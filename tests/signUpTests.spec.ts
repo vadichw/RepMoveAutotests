@@ -1,3 +1,4 @@
+import { faker } from '@faker-js/faker';
 import { test, expect } from '../fixtures/customFixtures';
 import { NewUserModel } from '../model/signUpModel';
 
@@ -9,9 +10,9 @@ test.describe('SignUp RepMove UI Tests', () => {
 
     test('Should create new user successfully with valid credentials UI Test', async ({ basePage, signUpPage }) => {
         const testUserData = {
-            firstName: 'Test',
-            lastName: 'Last',
-            companyName: 'Test',
+            firstName: faker.person.firstName(),
+            lastName: faker.person.lastName(),
+            companyName: faker.company.name(),
             industry: 'Medical',
             email: `testuser${Date.now()}@gmail.com`,
             phoneCountryCode: '+380',
