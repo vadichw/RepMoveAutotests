@@ -1,0 +1,19 @@
+{
+  "name": "repmoveautotests",
+  "version": "1.0.0",
+  "description": "Test task for QA",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  }
+}

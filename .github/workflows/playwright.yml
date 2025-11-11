@@ -1,0 +1,157 @@
+name: Playwright Tests with Allure Report
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-tests, run-tests-prod]
+
+jobs:
+  test:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      BASE_URL: ${{ github.event.action == 'run-tests-prod' && secrets.BASE_URL_PROD || secrets.BASE_URL }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install -g allure-commandline
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright tests with Allure and save logs
+        run: |
+          npx playwright test
+        env:
+          ALLURE_RESULTS_DIR: allure-results
+
+      - name: Generate Allure Report
+        if: always()
+        run: allure generate allure-results --clean -o allure-report
+
+      - name: Get Test Results Summary
+        id: test_summary
+        if: always()
+        run: |
+          PASSED_COUNT=$(jq .statistic.passed allure-report/widgets/summary.json)
+          FAILED_COUNT=$(jq .statistic.failed allure-report/widgets/summary.json)
+          BROKEN_COUNT=$(jq .statistic.broken allure-report/widgets/summary.json)
+          
+          echo "PASSED_COUNT=$PASSED_COUNT" >> $GITHUB_ENV
+          echo "FAILED_COUNT=$FAILED_COUNT" >> $GITHUB_ENV
+          echo "BROKEN_COUNT=$BROKEN_COUNT" >> $GITHUB_ENV
+
+          FAILED_TESTS_LIST=$(jq -r 'select(.status == "failed" or .status == "broken") | "- \(.status | ascii_upcase): \(.name)"' allure-results/*-result.json)
+          
+          if [ -n "$FAILED_TESTS_LIST" ]; then
+            echo "FAILED_TESTS<<EOF" >> $GITHUB_ENV
+            echo "$FAILED_TESTS_LIST" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "FAILED_TESTS=" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Allure Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-results
+          path: allure-results/
+          retention-days: 30
+
+      - name: Upload Allure Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-report
+          path: allure-report/
+          retention-days: 30
+
+      - name: Get Allure Report artifact URL
+        id: get_artifact
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runId = context.runId;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo, run_id: runId
+            });
+            const artifact = data.artifacts.find(a => a.name === 'allure-report');
+            if (!artifact) {
+              core.warning('Artifact "allure-report" not found');
+              return;
+            }
+            const artifactUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}/artifacts/${artifact.id}`;
+            core.setOutput("artifact_url", artifactUrl);
+
+      - name: Send Allure report link to Slack
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ secrets.SLACK_CHANNEL_ID }}
+          JOB_STATUS: ${{ job.status }}
+          ARTIFACT_URL: ${{ steps.get_artifact.outputs.artifact_url }}
+          PASSED_COUNT: ${{ env.PASSED_COUNT }}
+          FAILED_COUNT: ${{ env.FAILED_COUNT }}
+          BROKEN_COUNT: ${{ env.BROKEN_COUNT }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            STATUS="*Playwright Tests Passed*"
+            DETAILS="\n*Passed:* $PASSED_COUNT\n*Failed:* $FAILED_COUNT\n*Broken:* $BROKEN_COUNT"
+          else
+            STATUS="*Playwright Tests Failed*"
+            if [ -n "$FAILED_TESTS" ]; then
+              FAILED_HEADER="*Test Failures*\n*${FAILED_COUNT} failed, ${BROKEN_COUNT} broken, ${PASSED_COUNT} passed*"
+              FAILED_LIST="$FAILED_TESTS"
+              DETAILS="\n\n${FAILED_HEADER}\n${FAILED_LIST}"
+            else
+              DETAILS="\n*Passed:* $PASSED_COUNT\n*Failed:* $FAILED_COUNT\n*Broken:* $BROKEN_COUNT\n_(Could not retrieve the list of failed tests)_"
+            fi
+          fi
+
+          INSTRUCTIONS="\n\n*How to view the report:*\n1️⃣ Click the link to download \`allure-report.zip\`.\n2️⃣ Unzip the file.\n3️⃣ Open a terminal and navigate into the unzipped \`allure-report\` folder.\n4️⃣ Run the command: \`npx http-server\`\n5️⃣ Open your browser to the URL shown in the terminal (usually \`http://localhost:8080\`)"
+
+          if [ -n "$ARTIFACT_URL" ]; then
+            TEXT="$STATUS :rocket:${DETAILS}\n\n*Allure Report is ready!*\n\n<${ARTIFACT_URL}|Download Allure Report (ZIP)>$INSTRUCTIONS"
+          else
+            ARTIFACTS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            TEXT="$STATUS :rocket:${DETAILS}\n\n*Allure Report is ready!*\n\nGo to the link and download the 'allure-report' artifact:\n<${ARTIFACTS_URL}|Open artifacts page>$INSTRUCTIONS"
+          fi
+
+          echo "Sending message to Slack..."
+          
+          response=$(curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "{
+              \"channel\": \"$CHANNEL\",
+              \"text\": \"$TEXT\"
+            }")
+          
+          echo "Slack API response: $response"
+          
+          if echo "$response" | grep -q '"ok":true'; then
+            echo "Message sent successfully to Slack"
+          else
+            echo "Failed to send message to Slack"
+            echo "Response: $response"
+            exit 1
+          fi
